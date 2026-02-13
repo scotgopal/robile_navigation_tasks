@@ -1,0 +1,26 @@
+❯ ros2 bag info rosbag2_2026_02_11-20_01_08/
+
+Files:             rosbag2_2026_02_11-20_01_08_0.mcap
+Bag size:          37.4 MiB
+Storage id:        mcap
+Duration:          72.074034362s
+Start:             Feb 11 2026 20:01:09.016580941 (1770836469.016580941)
+End:               Feb 11 2026 20:02:21.090615303 (1770836541.090615303)
+Messages:          146136
+Topic information: Topic: /urg_node2/transition_event | Type: lifecycle_msgs/msg/TransitionEvent | Count: 0 | Serialization Format: cdr
+                   Topic: /tf | Type: tf2_msgs/msg/TFMessage | Count: 14363 | Serialization Format: cdr
+                   Topic: /status | Type: std_msgs/msg/Int32 | Count: 28726 | Serialization Format: cdr
+                   Topic: /robot_description | Type: std_msgs/msg/String | Count: 1 | Serialization Format: cdr
+                   Topic: /odom | Type: nav_msgs/msg/Odometry | Count: 14386 | Serialization Format: cdr
+                   Topic: /imu | Type: sensor_msgs/msg/Imu | Count: 57442 | Serialization Format: cdr
+                   Topic: /events/write_split | Type: rosbag2_interfaces/msg/WriteSplitEvent | Count: 0 | Serialization Format: cdr
+                   Topic: /rosout | Type: rcl_interfaces/msg/Log | Count: 21 | Serialization Format: cdr
+                   Topic: /diagnostics | Type: diagnostic_msgs/msg/DiagnosticArray | Count: 144 | Serialization Format: cdr
+                   Topic: /parameter_events | Type: rcl_interfaces/msg/ParameterEvent | Count: 0 | Serialization Format: cdr
+                   Topic: /joint_states | Type: sensor_msgs/msg/JointState | Count: 0 | Serialization Format: cdr
+                   Topic: /joy | Type: sensor_msgs/msg/Joy | Count: 1605 | Serialization Format: cdr
+                   Topic: /odom_initialized | Type: std_msgs/msg/Empty | Count: 0 | Serialization Format: cdr
+                   Topic: /tf_static | Type: tf2_msgs/msg/TFMessage | Count: 3 | Serialization Format: cdr
+                   Topic: /error | Type: std_msgs/msg/Int32 | Count: 14363 | Serialization Format: cdr
+                   Topic: /scan | Type: sensor_msgs/msg/LaserScan | Count: 718 | Serialization Format: cdr
+                   Topic: /battery | Type: std_msgs/msg/Float32 | Count: 14364 | Serialization Format: cdr
