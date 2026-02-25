@@ -1,0 +1,28 @@
+# Simple Potential Field Planner parameters
+# Values aligned with config/refactored_potential_field_planner.yaml where names match.
+# Use with: python3 simple_potential_field_planner.py --config config/simple_potential_field_planner.yaml
+# Or: python3 simple_potential_field_planner.py --ros-args --params-file config/simple_potential_field_planner.yaml
+# When packaged, pass this file via the launch file's 'config_file' argument.
+
+simple_potential_field_planner:
+  ros__parameters:
+    # Potential field parameters (from k_attr_base, k_rep_base, rho_0)
+    k_attr: 0.8
+    k_rep: 0.6
+    rho_0: 1.0
+    # Goal tolerances
+    goal_dist_tolerance: 0.5
+    goal_angle_tolerance: 1.0
+    # Velocity limits (from max_linear_vel_base, max_angular_vel_base, min_*, min_*)
+    max_linear_vel: 0.6
+    max_angular_vel: 0.3
+    min_angular_vel: 0.2
+    min_linear_vel: 0.5
+    # Control gains (from angular_gain_navigation_base)
+    angular_gain: 0.6
+    # Stuck detection (from stuck_threshold_base, stuck_timeout)
+    stuck_threshold: 0.15
+    stuck_timeout: 5.0
+    # Visualization (force_arrow_max_length caps arrow length to avoid haywire RViz)
+    force_visualization_scale: 2.0
+    force_arrow_max_length: 2.0
