@@ -35,6 +35,7 @@ setup(
         'console_scripts': [
             'astar_global_planner = astar_global_planner.astar_global_planner:main',
             'waypoint_follower = astar_global_planner.waypoint_follower:main',
+            'waypoint_manager = astar_global_planner.waypoint_manager:main',
         ],
     },
 )

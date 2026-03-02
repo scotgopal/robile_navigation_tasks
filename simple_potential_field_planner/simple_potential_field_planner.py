@@ -14,6 +14,7 @@ import math
 import signal
 import random
 import sys
+import uuid
 
 import numpy as np
 import rclpy
@@ -25,6 +26,8 @@ from geometry_msgs.msg import Twist, PoseStamped, Point
 from nav_msgs.msg import Path
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA, Float64MultiArray
+from action_msgs.msg import GoalStatus, GoalStatusArray
+from unique_identifier_msgs.msg import UUID
 import tf2_ros
 import tf_transformations
 from tf2_geometry_msgs import do_transform_pose
@@ -136,6 +139,10 @@ class SimplePotentialFieldPlanner(Node):
         self.stuck_time = 0.0
         self.stuck_logged = False
 
+        # Next goal check
+        self.next_goal_check_timer = None
+        self.pending_goal = None  # Stores goal received while checking for next
+
         # Trajectory state
         self.trajectory = []
         self.last_trajectory_pose = None
@@ -161,6 +168,9 @@ class SimplePotentialFieldPlanner(Node):
         self.goal_pose_marker_publisher = self.create_publisher(
             MarkerArray, "/goal_pose_marker", 10
         )
+        self.goal_status_publisher = self.create_publisher(
+            GoalStatusArray, "/goal_status", 10
+        )
 
         # Subscribers
         self.scan_subscriber = self.create_subscription(
@@ -176,6 +186,9 @@ class SimplePotentialFieldPlanner(Node):
         # Timers
         self.control_timer = self.create_timer(0.1, self.control_loop)  # 10 Hz
         self.trajectory_timer = self.create_timer(0.5, self.publish_trajectory)  # 2 Hz
+
+        # Goal tracking for status publishing
+        self.current_goal_id = UUID()
 
         self.logger.info("Simple Potential Field Planner initialized")
         self.logger.info("Waiting for goal pose from /goal_pose topic")
@@ -219,46 +232,12 @@ class SimplePotentialFieldPlanner(Node):
             self.last_cmd_vel_time = self.get_clock().now()
 
     def goal_pose_callback(self, msg: PoseStamped):
-        """Process new goal pose."""
-        try:
-            goal_frame = msg.header.frame_id
-            self.logger.info(
-                f"Received goal in frame '{goal_frame}' at "
-                f"({msg.pose.position.x:.2f}, {msg.pose.position.y:.2f})"
-            )
-
-            # Transform to odom frame
-            goal_pose_odom = self._transform_pose_to_odom(msg, goal_frame)
-            if goal_pose_odom is None:
-                return
-
-            # Extract goal [x, y, theta]
-            self.goal_odom = self._extract_pose_array(goal_pose_odom)
-
-            # Clear previous goal visualization and show new goal
-            self._clear_goal_marker()
-
-            # Reset state for new goal
-            self.stuck_time = 0.0
-            self.stuck_logged = False
-            self.goal_reached_logged = False
-            self.goal_achieved = False
-            self.orientation_phase_logged = False
-
-            # Start new trajectory with new color
-            self.trajectory = []
-            self.last_trajectory_pose = None
-            self.trajectory_color = self._generate_random_color()
-
-            self._publish_goal_marker()
-
-            self.logger.info(
-                f"Goal set: x={self.goal_odom[0]:.2f}, y={self.goal_odom[1]:.2f}, "
-                f"theta={self.goal_odom[2]:.2f} rad (odom frame)"
-            )
-
-        except Exception as e:
-            self.logger.error(f"Error processing goal pose: {e}")
+        """Process new goal pose from /goal_pose topic."""
+        # If we're in the 20ms wait window after reaching a goal, store as pending
+        if self.goal_achieved and self.next_goal_check_timer is not None:
+            self.pending_goal = msg
+            return
+        self._process_new_goal(msg)
 
     # ==========================================================================
     # Helper Methods
@@ -857,6 +836,9 @@ class SimplePotentialFieldPlanner(Node):
                 if not self.goal_reached_logged:
                     self.logger.info("Goal reached!")
                     self.goal_reached_logged = True
+                    self._publish_goal_status(GoalStatus.STATUS_SUCCEEDED)
+                    # Schedule a 20ms check for the next goal
+                    self._schedule_next_goal_check()
                 return
 
         # Calculate potential field forces
@@ -877,6 +859,91 @@ class SimplePotentialFieldPlanner(Node):
 
         # Publish velocity
         self._publish_velocity(linear_x, angular_z)
+
+    def _publish_goal_status(self, status: int):
+        """Publish goal status to /goal_status topic."""
+        status_msg = GoalStatusArray()
+        status_msg.header.stamp = self.get_clock().now().to_msg()
+        status_msg.header.frame_id = ""
+
+        goal_status = GoalStatus()
+        goal_status.goal_info.goal_id = self.current_goal_id
+        goal_status.goal_info.stamp = self.get_clock().now().to_msg()
+        goal_status.status = status
+
+        status_msg.status_list.append(goal_status)
+        self.goal_status_publisher.publish(status_msg)
+        self.logger.info(f"Published goal status: {status}")
+
+    def _schedule_next_goal_check(self):
+        """Schedule a one-shot 20ms timer to check for the next goal."""
+        if self.next_goal_check_timer is not None:
+            self.next_goal_check_timer.cancel()
+        self.next_goal_check_timer = self.create_timer(
+            0.02, self._check_for_next_goal
+        )
+
+    def _check_for_next_goal(self):
+        """Called 20ms after goal reached to check if a new goal has arrived."""
+        # Cancel the one-shot timer
+        if self.next_goal_check_timer is not None:
+            self.next_goal_check_timer.cancel()
+            self.destroy_timer(self.next_goal_check_timer)
+            self.next_goal_check_timer = None
+
+        if self.pending_goal is not None:
+            self.logger.info("Next goal detected, proceeding to new goal")
+            goal = self.pending_goal
+            self.pending_goal = None
+            self._process_new_goal(goal)
+        else:
+            self.logger.info("No new goal received, waiting for next goal on /goal_pose")
+
+    def _process_new_goal(self, msg: PoseStamped):
+        """Process a new goal pose and start navigating towards it."""
+        try:
+            goal_frame = msg.header.frame_id
+            self.logger.info(
+                f"Received goal in frame '{goal_frame}' at "
+                f"({msg.pose.position.x:.2f}, {msg.pose.position.y:.2f})"
+            )
+
+            # Transform to odom frame
+            goal_pose_odom = self._transform_pose_to_odom(msg, goal_frame)
+            if goal_pose_odom is None:
+                return
+
+            # Extract goal [x, y, theta]
+            self.goal_odom = self._extract_pose_array(goal_pose_odom)
+
+            # Clear previous goal visualization and show new goal
+            self._clear_goal_marker()
+
+            # Generate a new goal ID for status tracking
+            goal_uuid = uuid.uuid4()
+            self.current_goal_id = UUID(uuid=list(goal_uuid.bytes))
+
+            # Reset state for new goal
+            self.stuck_time = 0.0
+            self.stuck_logged = False
+            self.goal_reached_logged = False
+            self.goal_achieved = False
+            self.orientation_phase_logged = False
+
+            # Start new trajectory with new color
+            self.trajectory = []
+            self.last_trajectory_pose = None
+            self.trajectory_color = self._generate_random_color()
+
+            self._publish_goal_marker()
+
+            self.logger.info(
+                f"Goal set: x={self.goal_odom[0]:.2f}, y={self.goal_odom[1]:.2f}, "
+                f"theta={self.goal_odom[2]:.2f} rad (odom frame)"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error processing goal pose: {e}")
 
     def _publish_stop(self):
         """Publish zero velocity."""
