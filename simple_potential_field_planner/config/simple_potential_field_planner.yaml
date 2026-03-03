@@ -11,8 +11,8 @@ simple_potential_field_planner:
     k_rep: 0.6
     rho_0: 1.0
     # Goal tolerances
-    goal_dist_tolerance: 0.5
-    goal_angle_tolerance: 1.0
+    goal_dist_tolerance: 0.1
+    goal_angle_tolerance: 0.35
     # Velocity limits (from max_linear_vel_base, max_angular_vel_base, min_*, min_*)
     max_linear_vel: 0.6
     max_angular_vel: 0.3

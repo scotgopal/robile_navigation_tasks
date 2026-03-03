@@ -177,7 +177,7 @@ class SimplePotentialFieldPlanner(Node):
             LaserScan, "/scan", self.scan_callback, 10
         )
         self.goal_pose_subscriber = self.create_subscription(
-            PoseStamped, "/goal_pose", self.goal_pose_callback, 10
+            PoseStamped, "/local_goal_pose", self.goal_pose_callback, 10
         )
         self.cmd_vel_subscriber = self.create_subscription(
             Twist, "/cmd_vel", self.cmd_vel_callback, 10
@@ -191,7 +191,7 @@ class SimplePotentialFieldPlanner(Node):
         self.current_goal_id = UUID()
 
         self.logger.info("Simple Potential Field Planner initialized")
-        self.logger.info("Waiting for goal pose from /goal_pose topic")
+        self.logger.info("Waiting for goal pose from /local_goal_pose topic")
 
     # ==========================================================================
     # Parameter Management
@@ -232,7 +232,7 @@ class SimplePotentialFieldPlanner(Node):
             self.last_cmd_vel_time = self.get_clock().now()
 
     def goal_pose_callback(self, msg: PoseStamped):
-        """Process new goal pose from /goal_pose topic."""
+        """Process new goal pose from /local_goal_pose topic."""
         # If we're in the 20ms wait window after reaching a goal, store as pending
         if self.goal_achieved and self.next_goal_check_timer is not None:
             self.pending_goal = msg
@@ -249,13 +249,17 @@ class SimplePotentialFieldPlanner(Node):
         """Transform PoseStamped to odom frame."""
         if source_frame == "odom":
             return msg
-
         try:
             if self.tf_buffer.can_transform("odom", source_frame, rclpy.time.Time()):
                 transform = self.tf_buffer.lookup_transform(
                     "odom", source_frame, rclpy.time.Time()
                 )
-                return do_transform_pose(msg, transform)
+                transformed_pose = do_transform_pose(msg.pose, transform)
+                result = PoseStamped()
+                result.header.frame_id = "odom"
+                result.header.stamp = transform.header.stamp
+                result.pose = transformed_pose
+                return result
         except Exception as e:
             self.logger.warn(f"Cannot transform from {source_frame} to odom: {e}")
         return None
@@ -834,7 +838,14 @@ class SimplePotentialFieldPlanner(Node):
                 self.goal_achieved = True
                 self._publish_stop()
                 if not self.goal_reached_logged:
-                    self.logger.info("Goal reached!")
+                    self.logger.info(
+                        "Goal reached! Final error: position %.3f m, orientation %.3f° (%.4f rad)"
+                        % (
+                            distance_to_goal,
+                            math.degrees(angle_error_final),
+                            angle_error_final,
+                        )
+                    )
                     self.goal_reached_logged = True
                     self._publish_goal_status(GoalStatus.STATUS_SUCCEEDED)
                     # Schedule a 20ms check for the next goal
@@ -863,8 +874,6 @@ class SimplePotentialFieldPlanner(Node):
     def _publish_goal_status(self, status: int):
         """Publish goal status to /goal_status topic."""
         status_msg = GoalStatusArray()
-        status_msg.header.stamp = self.get_clock().now().to_msg()
-        status_msg.header.frame_id = ""
 
         goal_status = GoalStatus()
         goal_status.goal_info.goal_id = self.current_goal_id
@@ -879,9 +888,7 @@ class SimplePotentialFieldPlanner(Node):
         """Schedule a one-shot 20ms timer to check for the next goal."""
         if self.next_goal_check_timer is not None:
             self.next_goal_check_timer.cancel()
-        self.next_goal_check_timer = self.create_timer(
-            0.02, self._check_for_next_goal
-        )
+        self.next_goal_check_timer = self.create_timer(0.02, self._check_for_next_goal)
 
     def _check_for_next_goal(self):
         """Called 20ms after goal reached to check if a new goal has arrived."""
@@ -897,7 +904,9 @@ class SimplePotentialFieldPlanner(Node):
             self.pending_goal = None
             self._process_new_goal(goal)
         else:
-            self.logger.info("No new goal received, waiting for next goal on /goal_pose")
+            self.logger.info(
+                "No new goal received, waiting for next goal on /local_goal_pose"
+            )
 
     def _process_new_goal(self, msg: PoseStamped):
         """Process a new goal pose and start navigating towards it."""

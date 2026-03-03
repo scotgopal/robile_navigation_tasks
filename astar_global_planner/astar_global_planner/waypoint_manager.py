@@ -3,7 +3,7 @@
 Waypoint Manager Node
 
 Subscribes to /waypoints (PoseStamped) and forwards them one-by-one
-to /goal_pose.  The first waypoint is published immediately.  Every
+to /local_goal_pose.  The first waypoint is published immediately.  Every
 subsequent waypoint is queued and only published after the previous
 one is confirmed as reached via /goal_status (GoalStatusArray).
 
@@ -23,22 +23,21 @@ from unique_identifier_msgs.msg import UUID as UuidMsg
 
 
 class WaypointManager(Node):
-
     def __init__(self):
-        super().__init__('waypoint_manager')
+        super().__init__("waypoint_manager")
 
         # ---- Parameters ------------------------------------------------
-        self.declare_parameter('cooldown_sec', 2.0)
+        self.declare_parameter("cooldown_sec", 2.0)
 
         self._cooldown_sec = (
-            self.get_parameter('cooldown_sec').get_parameter_value().double_value
+            self.get_parameter("cooldown_sec").get_parameter_value().double_value
         )
 
         # ---- State -----------------------------------------------------
-        self._queue: list = []                # [(PoseStamped, int), ...] waiting
-        self._active_wp = None                # waypoint currently navigating to
-        self._wp_count: int = 0               # total waypoints received (for logging)
-        self._active_wp_number: int = 0       # 1-based index of the active waypoint
+        self._queue: list = []  # [(PoseStamped, int), ...] waiting
+        self._active_wp = None  # waypoint currently navigating to
+        self._wp_count: int = 0  # total waypoints received (for logging)
+        self._active_wp_number: int = 0  # 1-based index of the active waypoint
 
         # Set of goal UUIDs that were already present *before* the
         # current waypoint was published.  Used to detect new goals.
@@ -53,20 +52,20 @@ class WaypointManager(Node):
         self._cooldown_timer = None
 
         # ---- Publisher --------------------------------------------------
-        self.goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
+        self.goal_pub = self.create_publisher(PoseStamped, "/local_goal_pose", 10)
 
         # ---- Subscribers ------------------------------------------------
         self.waypoint_sub = self.create_subscription(
-            PoseStamped, '/waypoints', self._waypoint_cb, 10
+            PoseStamped, "/waypoints", self._waypoint_cb, 10
         )
         self.status_sub = self.create_subscription(
-            GoalStatusArray, '/goal_status', self._status_cb, 10
+            GoalStatusArray, "/goal_status", self._status_cb, 10
         )
 
-        self.get_logger().info('Waypoint Manager initialised')
-        self.get_logger().info('  Listening for waypoints on  /waypoints')
-        self.get_logger().info('  Publishing goals to         /goal_pose')
-        self.get_logger().info('  Monitoring status on        /goal_status')
+        self.get_logger().info("Waypoint Manager initialised")
+        self.get_logger().info("  Listening for waypoints on  /waypoints")
+        self.get_logger().info("  Publishing goals to         /local_goal_pose")
+        self.get_logger().info("  Monitoring status on        /goal_status")
 
     # ==================================================================
     # /waypoints callback
@@ -80,8 +79,8 @@ class WaypointManager(Node):
         """
         self._wp_count += 1
         self.get_logger().info(
-            f'Received waypoint #{self._wp_count}: '
-            f'({msg.pose.position.x:.2f}, {msg.pose.position.y:.2f})'
+            f"Received waypoint #{self._wp_count}: "
+            f"({msg.pose.position.x:.2f}, {msg.pose.position.y:.2f})"
         )
 
         if self._active_wp is None:
@@ -91,15 +90,15 @@ class WaypointManager(Node):
             # Currently navigating — queue for later
             self._queue.append((msg, self._wp_count))
             self.get_logger().info(
-                f'  Queued (waiting for current goal to be reached). '
-                f'Queue size: {len(self._queue)}'
+                f"  Queued (waiting for current goal to be reached). "
+                f"Queue size: {len(self._queue)}"
             )
 
     # ==================================================================
     # Goal publishing
     # ==================================================================
     def _publish_waypoint(self, wp: PoseStamped, wp_number: int):
-        """Publish a single waypoint to /goal_pose and mark it active."""
+        """Publish a single waypoint to /local_goal_pose and mark it active."""
         self._active_wp = wp
         self._active_wp_number = wp_number
         self._current_goal_id = None  # will be detected in status callback
@@ -108,8 +107,8 @@ class WaypointManager(Node):
         self.goal_pub.publish(wp)
 
         self.get_logger().info(
-            f'[Waypoint {wp_number}] Published goal: '
-            f'x={wp.pose.position.x:.2f}, y={wp.pose.position.y:.2f}'
+            f"[Waypoint {wp_number}] Published goal: "
+            f"x={wp.pose.position.x:.2f}, y={wp.pose.position.y:.2f}"
         )
 
         # Start cooldown to avoid processing stale status
@@ -122,8 +121,9 @@ class WaypointManager(Node):
             self._publish_waypoint(next_wp, next_number)
         else:
             self._active_wp = None
+            self._cancel_cooldown()
             self.get_logger().info(
-                '=== All waypoints reached! Navigation complete. ==='
+                "=== All waypoints reached! Navigation complete. ==="
             )
 
     # ==================================================================
@@ -131,18 +131,28 @@ class WaypointManager(Node):
     # ==================================================================
     def _status_cb(self, msg: GoalStatusArray):
         """Check whether the current goal has been reached or failed."""
-        if self._active_wp is None or self._cooldown_active:
+        if self._active_wp is None:
             return
 
         if not msg.status_list:
             return
 
+        # During cooldown, only process if we see SUCCEEDED for a new goal ID.
+        # (Planner may publish SUCCEEDED only once when reached; we must not drop it.)
+        if self._cooldown_active:
+            has_new_succeeded = any(
+                s.status == GoalStatus.STATUS_SUCCEEDED
+                and bytes(s.goal_info.goal_id.uuid) not in self._known_goal_ids
+                for s in msg.status_list
+            )
+            if not has_new_succeeded:
+                return
+
         # ---- Identify the current goal by its UUID -------------------
         # After the cooldown expires the first new goal ID we see is the
-        # one we just published.
+        # one we just published. During cooldown we only get here for new SUCCEEDED.
         current_ids = {
-            bytes(status.goal_info.goal_id.uuid)
-            for status in msg.status_list
+            bytes(status.goal_info.goal_id.uuid) for status in msg.status_list
         }
 
         if self._current_goal_id is None:
@@ -151,8 +161,8 @@ class WaypointManager(Node):
                 self._current_goal_id = new_ids.pop()
                 self._known_goal_ids.update(current_ids)
                 self.get_logger().info(
-                    f'[Waypoint {self._active_wp_number}] Tracking goal ID: '
-                    f'{self._uuid_to_hex(self._current_goal_id)}'
+                    f"[Waypoint {self._active_wp_number}] Tracking goal ID: "
+                    f"{self._uuid_to_hex(self._current_goal_id)}"
                 )
 
         if self._current_goal_id is None:
@@ -167,10 +177,10 @@ class WaypointManager(Node):
             if status.status == GoalStatus.STATUS_SUCCEEDED:
                 wp = self._active_wp
                 self.get_logger().info(
-                    f'[Waypoint {self._active_wp_number}] '
-                    f'REACHED — '
-                    f'x={wp.pose.position.x:.2f}, y={wp.pose.position.y:.2f}  '
-                    f'(id: {self._uuid_to_hex(goal_id)})'
+                    f"[Waypoint {self._active_wp_number}] "
+                    f"REACHED — "
+                    f"x={wp.pose.position.x:.2f}, y={wp.pose.position.y:.2f}  "
+                    f"(id: {self._uuid_to_hex(goal_id)})"
                 )
                 self._advance_to_next()
                 return
@@ -178,20 +188,20 @@ class WaypointManager(Node):
             elif status.status == GoalStatus.STATUS_ABORTED:
                 wp = self._active_wp
                 self.get_logger().warn(
-                    f'[Waypoint {self._active_wp_number}] '
-                    f'ABORTED — '
-                    f'x={wp.pose.position.x:.2f}, y={wp.pose.position.y:.2f}  '
-                    f'(id: {self._uuid_to_hex(goal_id)})  '
-                    f'Skipping to next waypoint.'
+                    f"[Waypoint {self._active_wp_number}] "
+                    f"ABORTED — "
+                    f"x={wp.pose.position.x:.2f}, y={wp.pose.position.y:.2f}  "
+                    f"(id: {self._uuid_to_hex(goal_id)})  "
+                    f"Skipping to next waypoint."
                 )
                 self._advance_to_next()
                 return
 
             elif status.status == GoalStatus.STATUS_CANCELED:
                 self.get_logger().warn(
-                    f'[Waypoint {self._active_wp_number}] '
-                    f'CANCELED (id: {self._uuid_to_hex(goal_id)}) — '
-                    f'stopping navigation.'
+                    f"[Waypoint {self._active_wp_number}] "
+                    f"CANCELED (id: {self._uuid_to_hex(goal_id)}) — "
+                    f"stopping navigation."
                 )
                 self._reset_navigation()
                 return
@@ -206,7 +216,7 @@ class WaypointManager(Node):
     @staticmethod
     def _uuid_to_hex(uuid_bytes: bytes) -> str:
         """Return a short hex representation of a 16-byte UUID."""
-        return uuid_bytes.hex()[:12] + '...'
+        return uuid_bytes.hex()[:12] + "..."
 
     def _reset_navigation(self):
         self._active_wp = None
@@ -219,9 +229,7 @@ class WaypointManager(Node):
     def _start_cooldown(self):
         self._cancel_cooldown()
         self._cooldown_active = True
-        self._cooldown_timer = self.create_timer(
-            self._cooldown_sec, self._end_cooldown
-        )
+        self._cooldown_timer = self.create_timer(self._cooldown_sec, self._end_cooldown)
 
     def _end_cooldown(self):
         if self._cooldown_timer is not None:
@@ -229,7 +237,7 @@ class WaypointManager(Node):
             self.destroy_timer(self._cooldown_timer)
             self._cooldown_timer = None
         self._cooldown_active = False
-        self.get_logger().debug('Cooldown ended — now monitoring goal status')
+        self.get_logger().debug("Cooldown ended — now monitoring goal status")
 
     def _cancel_cooldown(self):
         self._cooldown_active = False
@@ -243,17 +251,18 @@ class WaypointManager(Node):
 # Entry point
 # =====================================================================
 
+
 def main(args=None):
     rclpy.init(args=args)
     node = WaypointManager()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().info('Shutting down Waypoint Manager')
+        node.get_logger().info("Shutting down Waypoint Manager")
     finally:
         node.destroy_node()
         rclpy.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
