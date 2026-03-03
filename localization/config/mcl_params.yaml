@@ -1,0 +1,49 @@
+# Monte Carlo Localization (MCL) node parameters
+# Use with: python3 mcl_node.py --config config/mcl_params.yaml
+# Or:       python3 localization.py --config config/mcl_params.yaml
+# Or:       python3 mcl_node.py --ros-args --params-file config/mcl_params.yaml
+# From launch: pass this file via Node(..., parameters=[config_file])
+
+mcl_node:
+  ros__parameters:
+    # Frames
+    map_frame_id: "map"
+    odom_frame_id: "odom"
+    base_frame_id: "base_footprint"
+
+    # Topics
+    scan_topic: "scan"
+    odom_topic: "odom"
+    map_topic: "map"
+    initial_pose_topic: "initialpose"
+
+    # Particle filter
+    num_particles: 1000
+    resample_interval: 1
+    update_min_d: 0.05   # min translation (m) before measurement update
+    update_min_a: 0.1    # min rotation (rad) before measurement update
+
+    # Motion model noise (differential drive style)
+    alpha1: 0.2   # rotation noise from rotation
+    alpha2: 0.2   # rotation noise from translation
+    alpha3: 0.2   # translation noise from translation
+    alpha4: 0.2   # translation noise from rotation
+
+    # Likelihood field
+    max_beams: 60
+    sigma_hit: 0.2
+    laser_max_range: 100.0
+    laser_min_range: -1.0
+    likelihood_max_dist: 2.0
+
+    # Output (RViz: pose, PoseWithCovariance, PoseArray, Path)
+    publish_pose_topic: "mean_pose"
+    publish_pose_with_covariance_topic: "pose_with_covariance"
+    publish_particle_cloud_topic: "particle_cloud"
+    particle_cloud_publish_rate: 5.0
+    publish_path_topic: "path"
+    path_max_poses: 100
+    # Path decay: only show poses from the last N seconds (0 = disabled, path stays by path_max_poses)
+    path_decay_time: 0.0
+    # Log computation timing every N scan updates (0 = disabled). Use e.g. 10 for a rough profile.
+    timing_log_interval: 0
