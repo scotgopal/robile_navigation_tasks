@@ -613,6 +613,7 @@ class AStarGlobalPlanner(Node):
         pose_array = PoseArray()
         pose_array.header.stamp = stamp
         pose_array.header.frame_id = self.grid.frame_id
+        poses_list: List[Pose] = []
 
         for i, (x, y) in enumerate(path_world):
             pose = Pose()
@@ -638,8 +639,10 @@ class AStarGlobalPlanner(Node):
             self.waypoint_pub.publish(wp)
 
             # Collect for PoseArray
-            pose_array.poses.append(pose)
+            poses_list.append(pose)
             prev_x, prev_y = x, y
+
+        pose_array.poses = poses_list
 
         # Publish all waypoints in one message
         self.waypoints_array_pub.publish(pose_array)

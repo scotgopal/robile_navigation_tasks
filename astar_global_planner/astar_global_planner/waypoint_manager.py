@@ -61,11 +61,26 @@ class WaypointManager(Node):
         self.status_sub = self.create_subscription(
             GoalStatusArray, "/goal_status", self._status_cb, 10
         )
+        self.goal_pose_sub = self.create_subscription(
+            PoseStamped, "/goal_pose", self._goal_pose_cb, 10
+        )
 
         self.get_logger().info("Waypoint Manager initialised")
         self.get_logger().info("  Listening for waypoints on  /waypoints")
         self.get_logger().info("  Publishing goals to         /local_goal_pose")
         self.get_logger().info("  Monitoring status on        /goal_status")
+        self.get_logger().info("  Clearing queue on           /goal_pose")
+
+    # ==================================================================
+    # /goal_pose callback — clears the waypoint queue
+    # ==================================================================
+    def _goal_pose_cb(self, msg: PoseStamped):
+        """A new goal was published on /goal_pose — always clear the waypoint queue."""
+        self.get_logger().info(
+            f"New goal on /goal_pose — clearing waypoint queue "
+            f"({len(self._queue)} queued, active={'yes' if self._active_wp else 'no'})"
+        )
+        self._reset_navigation()
 
     # ==================================================================
     # /waypoints callback
