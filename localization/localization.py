@@ -11,6 +11,7 @@ if _script_dir not in sys.path:
     sys.path.insert(0, _script_dir)
 
 import rclpy  # noqa: E402
+from rclpy.logging import LoggingSeverity, set_logger_level  # noqa: E402
 from mcl_node import MCLNode  # noqa: E402
 
 
@@ -25,7 +26,8 @@ def parse_config_args(args=None):
       python3 localization.py --ros-args --params-file config/mcl_params.yaml
     """
     if args is None:
-        args = sys.argv
+        args = sys.argv[1:]
+
     parser = argparse.ArgumentParser(
         description="Launch MCL (Monte Carlo Localization) node. Use --config to pass a params YAML."
     )
@@ -46,10 +48,20 @@ def parse_config_args(args=None):
 
 def main(args=None):
     ros_args = parse_config_args(args)
+    if "--debug" in ros_args:
+        ros_args.remove("--debug")
+        debug = True
+    else:
+        debug = False
     rclpy.init(args=ros_args)
     node = MCLNode()
+    if debug:
+        set_logger_level(node.get_name(), LoggingSeverity.DEBUG)
+        node.log.debug("Debug mode enabled")
     try:
-        rclpy.spin(node)
+        executor = rclpy.executors.MultiThreadedExecutor()
+        executor.add_node(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
@@ -58,4 +70,4 @@ def main(args=None):
 
 
 if __name__ == "__main__":
-    main(args=sys.argv)
+    main(args=sys.argv[1:])

@@ -38,8 +38,14 @@ from typing import Optional
 
 import numpy as np
 import rclpy
+from rclpy.logging import LoggingSeverity, set_logger_level
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from rclpy.qos import (
+    QoSProfile,
+    ReliabilityPolicy,
+    HistoryPolicy,
+    DurabilityPolicy,
+)
 from geometry_msgs.msg import PoseStamped, PoseArray, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry, OccupancyGrid, Path
 from sensor_msgs.msg import LaserScan
@@ -130,12 +136,14 @@ class MCLNode(Node):
 
     def __init__(self) -> None:
         super().__init__("mcl_node")
-
+        self.log = self.get_logger()
         self._init_parameters()
 
         # State
         self._map: Optional[np.ndarray] = None
-        self._map_metadata: Optional[dict] = None  # origin_x, origin_y, resolution, width, height
+        self._map_metadata: Optional[dict] = (
+            None  # origin_x, origin_y, resolution, width, height
+        )
 
         self._particles: Optional[np.ndarray] = None  # (N, 3) x, y, theta
         self._weights: Optional[np.ndarray] = None  # (N,)
@@ -213,9 +221,7 @@ class MCLNode(Node):
             self._publish_particle_cloud,
         )
 
-        self.get_logger().info(
-            "MCL node started; waiting for map and initial pose or params."
-        )
+        self.log.info("MCL node started; waiting for map and initial pose or params.")
         self._initialized = False
 
     def _get_param(self, name: str):
@@ -275,7 +281,7 @@ class MCLNode(Node):
             (msg.info.height, msg.info.width)
         )
         m = self._map_metadata
-        self.get_logger().info(
+        self.log.info(
             "Map received: %dx%d, res=%.3f" % (m["width"], m["height"], m["resolution"])
         )
         self._maybe_initialize_particles()
@@ -301,8 +307,8 @@ class MCLNode(Node):
         self._weights = np.ones(n) / n
         self._pose_estimate = (x, y, theta)
         self._initialized = True
-        self.get_logger().info(
-            "Particles initialized at (%.2f, %.2f, %.2f)" % (x, y, theta)
+        self.log.info(
+            f"{n} particles initialized at around (x:{x:.2f}, y:{y:.2f}, theta:{theta:.2f} rad)"
         )
 
     def _normalize_theta_column(self, col: int) -> None:
@@ -316,12 +322,14 @@ class MCLNode(Node):
     def _cb_initial_pose(self, msg: PoseWithCovarianceStamped) -> None:
         """Initialize or re-initialize particles at the given pose (e.g. from RViz 2D Pose Estimate)."""
         if self._map is None:
-            self.get_logger().warn("Initial pose received but map not yet available.")
+            self.log.warn("Initial pose received but map not yet available.")
             return
+        self.log.debug(f"Initial pose received: {msg}")
         p = msg.pose.pose.position
         q = msg.pose.pose.orientation
         _, _, yaw = euler_from_quaternion([q.x, q.y, q.z, q.w])
         self._initialize_particles_at(p.x, p.y, yaw)
+
         self._last_odom_pose = None
         self._last_odom_time = None
 
@@ -415,7 +423,7 @@ class MCLNode(Node):
         total_ms = (time.perf_counter() - t0) * 1000.0
         log_interval = self._get_param("timing_log_interval")
         if log_interval > 0 and self._update_counter % log_interval == 0:
-            self.get_logger().info(
+            self.log.info(
                 "MCL timing (ms): measurement=%.1f resample=%.1f publish=%.1f total=%.1f "
                 "(particles=%d max_beams=%d)"
                 % (
@@ -423,7 +431,7 @@ class MCLNode(Node):
                     t_resample,
                     t_publish,
                     total_ms,
-                    self._particles.shape[0] if self._particles is not None else 0,
+                    (self._particles.shape[0] if self._particles is not None else 0),
                     self._get_param("max_beams"),
                 )
             )
@@ -433,7 +441,7 @@ class MCLNode(Node):
         if self._particles is None or self._weights is None:
             return
         max_beams = self._get_param("max_beams")
-        sigma_hit = self._get_param("sigma_hit")
+        sigma_hit = float(self._get_param("sigma_hit"))
         max_range = self._get_param("laser_max_range")
         min_range = self._get_param("laser_min_range")
         likelihood_max_dist = self._get_param("likelihood_max_dist")
@@ -715,11 +723,22 @@ class MCLNode(Node):
 def main(args=None) -> None:
     # When run directly, use same launcher logic as localization.py (--config, -h/--help)
     from localization import parse_config_args
+
     ros_args = parse_config_args(args)
+    if "--debug" in ros_args:
+        ros_args.remove("--debug")
+        debug = True
+    else:
+        debug = False
     rclpy.init(args=ros_args)
     node = MCLNode()
+    if debug:
+        set_logger_level(node.get_name(), LoggingSeverity.DEBUG)
+        node.log.debug("Debug mode enabled")
     try:
-        rclpy.spin(node)
+        executor = rclpy.executors.MultiThreadedExecutor()
+        executor.add_node(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
@@ -728,4 +747,4 @@ def main(args=None) -> None:
 
 
 if __name__ == "__main__":
-    main(args=sys.argv)
+    main(args=sys.argv[1:])
