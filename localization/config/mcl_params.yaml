@@ -45,5 +45,3 @@ mcl_node:
     path_max_poses: 100
     # Path decay: only show poses from the last N seconds (0 = disabled, path stays by path_max_poses)
     path_decay_time: 0.0
-    # Log computation timing every N scan updates (0 = disabled). Use e.g. 10 for a rough profile.
-    timing_log_interval: 0

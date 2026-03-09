@@ -58,15 +58,18 @@ def main(args=None):
     if debug:
         set_logger_level(node.get_name(), LoggingSeverity.DEBUG)
         node.log.debug("Debug mode enabled")
+    executor = rclpy.executors.MultiThreadedExecutor()
+    executor.add_node(node)
     try:
-        executor = rclpy.executors.MultiThreadedExecutor()
-        executor.add_node(node)
-        executor.spin()
+        while rclpy.ok():
+            executor.spin()
     except KeyboardInterrupt:
-        pass
+        node.log.error("Keyboard interrupt received")
     finally:
+        executor.shutdown()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

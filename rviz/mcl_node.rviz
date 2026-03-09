@@ -33,7 +33,7 @@ Visualization Manager:
     - Class: rviz_default_plugins/LaserScan
       Color: 255; 0; 0
       Name: LaserScan
-      Size (m): 0.02
+      Size (m): 0.05
       Topic: /scan
       Enabled: true
     - Class: rviz_default_plugins/RobotModel

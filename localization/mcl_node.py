@@ -24,8 +24,6 @@ Suggested improvements (for later):
 - KLD-sampling to adapt particle count.
 - Beam skip / likelihood field outlier terms (z_short, z_max, z_rand) for
   robustness to dynamic obstacles and specular reflections.
-- Precompute distance transform for the map (e.g. scipy.ndimage) for faster
-  likelihood evaluation.
 """
 
 from __future__ import annotations
@@ -38,6 +36,7 @@ from typing import Optional
 
 import numpy as np
 import rclpy
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.logging import LoggingSeverity, set_logger_level
 from rclpy.node import Node
 from rclpy.qos import (
@@ -57,14 +56,13 @@ from tf_transformations import (
     quaternion_matrix,
     translation_matrix,
     concatenate_matrices,
-    inverse_matrix,
     translation_from_matrix,
     quaternion_from_matrix,
 )
 
 
 # -----------------------------------------------------------------------------
-# Map and likelihood field helpers (numpy only)
+# Map and likelihood field helpers
 # -----------------------------------------------------------------------------
 
 
@@ -110,17 +108,24 @@ def _distance_to_nearest_obstacle(
     return resolution * (max_search + 1)
 
 
-def _world_to_map(
-    x: float,
-    y: float,
-    origin_x: float,
-    origin_y: float,
+def _compute_distance_map(
+    grid: np.ndarray,
     resolution: float,
-) -> tuple[int, int]:
-    """World (m) to map cell indices."""
-    mx = int((x - origin_x) / resolution)
-    my = int((y - origin_y) / resolution)
-    return mx, my
+    max_dist: float,
+) -> np.ndarray:
+    """
+    Precompute distance (m) from each cell to nearest occupied cell (numpy).
+    """
+    h, w = grid.shape
+    max_search = min(50, int(max_dist / resolution) + 1)
+    dist_m = np.full((h, w), max_dist * resolution, dtype=np.float32)
+    for my in range(h):
+        for mx in range(w):
+            d = _distance_to_nearest_obstacle(
+                grid, mx, my, max_search=max_search, resolution=resolution
+            )
+            dist_m[my, mx] = min(d, max_dist)
+    return np.minimum(dist_m, max_dist)
 
 
 # -----------------------------------------------------------------------------
@@ -144,6 +149,9 @@ class MCLNode(Node):
         self._map_metadata: Optional[dict] = (
             None  # origin_x, origin_y, resolution, width, height
         )
+        self._dist_map: Optional[np.ndarray] = (
+            None  # precomputed distance to obstacle (m)
+        )
 
         self._particles: Optional[np.ndarray] = None  # (N, 3) x, y, theta
         self._weights: Optional[np.ndarray] = None  # (N,)
@@ -166,6 +174,10 @@ class MCLNode(Node):
             depth=3,
         )
 
+        # Interdependent callbacks (scan, odom, initial_pose, particle_cloud) share state;
+        # club them in one mutually exclusive group. Map stays in default (called once).
+        self._state_cb_group = MutuallyExclusiveCallbackGroup()
+
         self._map_sub = self.create_subscription(
             OccupancyGrid,
             self.get_parameter("map_topic").value,
@@ -177,48 +189,52 @@ class MCLNode(Node):
             self.get_parameter("scan_topic").value,
             self._cb_scan,
             qos_sensor,
+            callback_group=self._state_cb_group,
         )
         self._odom_sub = self.create_subscription(
             Odometry,
             self.get_parameter("odom_topic").value,
             self._cb_odom,
             10,
+            callback_group=self._state_cb_group,
         )
         self._initial_pose_sub = self.create_subscription(
             PoseWithCovarianceStamped,
             self.get_parameter("initial_pose_topic").value,
             self._cb_initial_pose,
             10,
+            callback_group=self._state_cb_group,
         )
 
         self._pose_pub = self.create_publisher(
             PoseStamped,
-            "~/" + str(self._get_param("publish_pose_topic")),
+            f"~/{self._get_param('publish_pose_topic')}",
             10,
         )
         self._pose_cov_pub = self.create_publisher(
             PoseWithCovarianceStamped,
-            "~/" + str(self._get_param("publish_pose_with_covariance_topic")),
+            f"~/{self._get_param('publish_pose_with_covariance_topic')}",
             10,
         )
         self._particle_cloud_pub = self.create_publisher(
             PoseArray,
-            "~/" + str(self._get_param("publish_particle_cloud_topic")),
+            f"~/{self._get_param('publish_particle_cloud_topic')}",
             10,
         )
         self._path_pub = self.create_publisher(
             Path,
-            "~/" + str(self._get_param("publish_path_topic")),
+            f"~/{self._get_param('publish_path_topic')}",
             10,
         )
         self._tf_broadcaster = TransformBroadcaster(self)
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
 
-        # Throttled particle cloud
+        # Throttled particle cloud (reads shared state; same group as scan/odom/initial_pose)
         self._particle_cloud_timer = self.create_timer(
             1.0 / self.get_parameter("particle_cloud_publish_rate").value,
             self._publish_particle_cloud,
+            callback_group=self._state_cb_group,
         )
 
         self.log.info("MCL node started; waiting for map and initial pose or params.")
@@ -264,10 +280,9 @@ class MCLNode(Node):
         self.declare_parameter("path_max_poses", 100)
         # Path decay: only show poses from the last path_decay_time seconds (0 = disabled).
         self.declare_parameter("path_decay_time", 0.0)
-        # Timing: log computation time every N scan updates (0 = disabled).
-        self.declare_parameter("timing_log_interval", 0)
 
     def _cb_map(self, msg: OccupancyGrid) -> None:
+        self.log.debug("_cb_map: fired")
         if self._map is not None:
             return
         self._map_metadata = {
@@ -280,21 +295,14 @@ class MCLNode(Node):
         self._map = np.array(msg.data, dtype=np.int32).reshape(
             (msg.info.height, msg.info.width)
         )
-        m = self._map_metadata
-        self.log.info(
-            "Map received: %dx%d, res=%.3f" % (m["width"], m["height"], m["resolution"])
+        self._dist_map = _compute_distance_map(
+            self._map,
+            self._map_metadata["resolution"],
+            self._get_param("likelihood_max_dist"),
         )
-        self._maybe_initialize_particles()
-
-    def _maybe_initialize_particles(self) -> None:
-        if self._map is None or self._initialized:
-            return
-        # Wait for initial pose from topic or use (0,0,0) as default
-        # We will set particles when we get first initialpose or first odom
-        # For now we don't auto-spawn; user must send initialpose or we use (0,0,0)
-        # after first odom (so we have a frame). We'll initialize on first initialpose
-        # or lazily in first scan/odom with default (0,0,0).
-        pass
+        self.log.info(
+            f"Map received: wxh = {self._map_metadata['width']}x{self._map_metadata['height']}, resolution = {self._map_metadata['resolution']:.3f} m/cell"
+        )
 
     def _initialize_particles_at(self, x: float, y: float, theta: float) -> None:
         n = self._get_param("num_particles")
@@ -321,6 +329,7 @@ class MCLNode(Node):
 
     def _cb_initial_pose(self, msg: PoseWithCovarianceStamped) -> None:
         """Initialize or re-initialize particles at the given pose (e.g. from RViz 2D Pose Estimate)."""
+        self.log.debug("_cb_initial_pose: fired")
         if self._map is None:
             self.log.warn("Initial pose received but map not yet available.")
             return
@@ -334,6 +343,7 @@ class MCLNode(Node):
         self._last_odom_time = None
 
     def _cb_odom(self, msg: Odometry) -> None:
+        self.log.debug("_cb_odom: fired")
         p = msg.pose.pose.position
         q = msg.pose.pose.orientation
         _, _, theta = euler_from_quaternion([q.x, q.y, q.z, q.w])
@@ -383,11 +393,10 @@ class MCLNode(Node):
         if self._map is None:
             return
         if not self._initialized:
-            # Fallback: auto-initialize at (0,0,0) on first scan. If user sends initialpose
-            # later, _cb_initial_pose will re-initialize at that pose.
-            self._initialize_particles_at(0.0, 0.0, 0.0)
+            return
         if self._particles is None:
             return
+        self.log.debug("_cb_scan: fired")
 
         # Check update threshold (min translation / rotation since last update)
         if self._last_odom_pose is None:
@@ -421,86 +430,57 @@ class MCLNode(Node):
         t_publish = (time.perf_counter() - t0u) * 1000.0
 
         total_ms = (time.perf_counter() - t0) * 1000.0
-        log_interval = self._get_param("timing_log_interval")
-        if log_interval > 0 and self._update_counter % log_interval == 0:
-            self.log.info(
-                "MCL timing (ms): measurement=%.1f resample=%.1f publish=%.1f total=%.1f "
-                "(particles=%d max_beams=%d)"
-                % (
-                    t_meas,
-                    t_resample,
-                    t_publish,
-                    total_ms,
-                    (self._particles.shape[0] if self._particles is not None else 0),
-                    self._get_param("max_beams"),
-                )
-            )
+        self.log.debug(
+            f"MCL timing (ms): measurement={t_meas:.1f} resample={t_resample:.1f} publish={t_publish:.1f} total={total_ms:.1f} "
+            f"(particles={self._particles.shape[0] if self._particles is not None else 0} max_beams={self._get_param('max_beams')})"
+        )
 
     def _measurement_update(self, msg: LaserScan) -> None:
-        """Likelihood-field model: weight particles by scan likelihood."""
-        if self._particles is None or self._weights is None:
+        """Likelihood-field model: weight particles by scan likelihood (vectorized)."""
+        if self._particles is None or self._weights is None or self._dist_map is None:
             return
         max_beams = self._get_param("max_beams")
         sigma_hit = float(self._get_param("sigma_hit"))
         max_range = self._get_param("laser_max_range")
         min_range = self._get_param("laser_min_range")
-        likelihood_max_dist = self._get_param("likelihood_max_dist")
 
         num_readings = len(msg.ranges)
         if num_readings == 0:
             return
         step = max(1, num_readings // max_beams)
-        ranges = np.array(msg.ranges, dtype=np.float64)
+        indices = np.arange(0, num_readings, step)[:max_beams]
+        r = np.array(msg.ranges, dtype=np.float64)[indices]
         angle_min = msg.angle_min
         angle_increment = msg.angle_increment
-
-        # Precompute beam angles (same for all particles)
-        indices = np.arange(0, num_readings, step)[:max_beams]
         angles = angle_min + indices * angle_increment
-        r = ranges[indices]
-        valid = (
-            np.isfinite(r)
-            & (r >= min_range if min_range >= 0 else True)
-            & (r <= max_range)
-        )
-        n_valid = np.sum(valid)
-        if n_valid == 0:
+        valid = np.isfinite(r) & (r <= max_range)
+        if min_range >= 0:
+            valid &= r >= min_range
+        if np.sum(valid) == 0:
             return
 
-        # For each particle, compute likelihood
         N = self._particles.shape[0]
-        log_weights = np.zeros(N)
         ox = self._map_metadata["origin_x"]
         oy = self._map_metadata["origin_y"]
         res = self._map_metadata["resolution"]
+        h, w = self._dist_map.shape
 
-        for i in range(N):
-            px, py, pth = (
-                self._particles[i, 0],
-                self._particles[i, 1],
-                self._particles[i, 2],
-            )
-            total = 0.0
-            for j in range(len(indices)):
-                if not valid[j]:
-                    continue
-                # Beam endpoint in world (particle frame then to map)
-                br = r[j]
-                ba = angles[j] + pth
-                wx = px + br * math.cos(ba)
-                wy = py + br * math.sin(ba)
-                mx, my = _world_to_map(wx, wy, ox, oy, res)
-                d = _distance_to_nearest_obstacle(
-                    self._map,
-                    mx,
-                    my,
-                    max_search=min(25, int(likelihood_max_dist / res)),
-                    resolution=res,
-                )
-                # Gaussian likelihood; clip d to avoid zeros
-                d = min(d, likelihood_max_dist)
-                total += -0.5 * (d / sigma_hit) ** 2
-            log_weights[i] = total
+        # All beam endpoints for all particles: (N, n_beams)
+        n_beams = len(indices)
+        px = self._particles[:, 0:1]
+        py = self._particles[:, 1:2]
+        pth = self._particles[:, 2:3]
+        r_b = r.reshape(1, n_beams)
+        angles_b = angles.reshape(1, n_beams)
+        wx = px + r_b * np.cos(angles_b + pth)
+        wy = py + r_b * np.sin(angles_b + pth)
+        mx = np.int32((wx - ox) / res)
+        my = np.int32((wy - oy) / res)
+        mx = np.clip(mx, 0, w - 1)
+        my = np.clip(my, 0, h - 1)
+
+        d = self._dist_map[my, mx]
+        log_weights = np.sum(np.where(valid, -0.5 * (d / sigma_hit) ** 2, 0.0), axis=1)
 
         # Normalize to weights (numerically stable)
         log_weights -= np.max(log_weights)
@@ -641,21 +621,32 @@ class MCLNode(Node):
         path_msg.poses = self._path_poses
         self._path_pub.publish(path_msg)
 
-        # TF: map -> odom = (map -> base) * (base -> odom) = T_map_base * inv(T_odom_base)
-        # so that odom -> base (from wheel odom) composes to give map -> base = our pose.
-        # Use scan timestamp so published pose and TF are consistent with the same lidar time.
+        # TF: lookup(base, odom) returns transform from odom to base (T_base_odom).
+        # We want map->odom so that map->base = map->odom * odom->base, i.e.
+        # T_map_base = T_map_odom * T_odom_base, so T_map_odom = T_map_base * T_base_odom.
+        # (Composition: point_in_map = T_map_base * point_in_base, point_in_base = T_base_odom * point_in_odom.)
+        scan_time = rclpy.time.Time.from_msg(stamp)
+        used_scan_time = True
         try:
-            scan_time = rclpy.time.Time.from_msg(stamp)
             odom_to_base = self._tf_buffer.lookup_transform(
                 base_frame,
                 odom_frame,
                 scan_time,
                 timeout=rclpy.duration.Duration(seconds=0.1),
             )
-        except Exception as e:
-            self.get_logger().debug("TF lookup odom->base failed: %s" % (e,))
-            return
-        T_odom_base = concatenate_matrices(
+        except Exception:
+            used_scan_time = False
+            try:
+                odom_to_base = self._tf_buffer.lookup_transform(
+                    base_frame,
+                    odom_frame,
+                    rclpy.time.Time(),
+                    timeout=rclpy.duration.Duration(seconds=0.1),
+                )
+            except Exception as e2:
+                self.log.debug(f"TF lookup odom->base at latest failed: {e2}")
+                return
+        T_base_odom = concatenate_matrices(
             translation_matrix(
                 [
                     odom_to_base.transform.translation.x,
@@ -682,12 +673,12 @@ class MCLNode(Node):
             ),
             quaternion_matrix(list(q)),
         )
-        T_map_odom = T_map_base @ inverse_matrix(T_odom_base)
+        T_map_odom = T_map_base @ T_base_odom
         trans = translation_from_matrix(T_map_odom)
         quat = quaternion_from_matrix(T_map_odom)
 
         t = TransformStamped()
-        t.header.stamp = stamp
+        t.header.stamp = stamp if used_scan_time else odom_to_base.header.stamp
         t.header.frame_id = global_frame
         t.child_frame_id = odom_frame
         t.transform.translation.x = float(trans[0])
@@ -702,6 +693,7 @@ class MCLNode(Node):
     def _publish_particle_cloud(self) -> None:
         if self._particles is None:
             return
+        self.log.debug("_publish_particle_cloud: fired")
         global_frame = self._get_param("map_frame_id")
         pa = PoseArray()
         pa.header.stamp = self.get_clock().now().to_msg()
@@ -735,15 +727,17 @@ def main(args=None) -> None:
     if debug:
         set_logger_level(node.get_name(), LoggingSeverity.DEBUG)
         node.log.debug("Debug mode enabled")
+    executor = rclpy.executors.MultiThreadedExecutor()
+    executor.add_node(node)
     try:
-        executor = rclpy.executors.MultiThreadedExecutor()
-        executor.add_node(node)
         executor.spin()
     except KeyboardInterrupt:
-        pass
+        node.log.error("Keyboard interrupt received")
     finally:
+        executor.shutdown()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":
