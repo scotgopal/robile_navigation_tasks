@@ -13,7 +13,8 @@ With parameters:
   python3 mcl_node.py --ros-args --params-file config/mcl_params.yaml
 
 Requires: map (nav_msgs/OccupancyGrid), scan (sensor_msgs/LaserScan), odom
-(nav_msgs/Odometry). Send initial pose via topic initialpose
+(nav_msgs/Odometry). Python deps: numpy, scipy, rclpy, tf_transformations.
+Send initial pose via topic initialpose
 (geometry_msgs/PoseWithCovarianceStamped) or the node initializes at (0,0,0)
 on first scan. The robot must publish odom -> base_footprint TF (e.g. from
 diff_drive or wheel odometry).
@@ -36,6 +37,7 @@ from typing import Optional
 
 import numpy as np
 import rclpy
+from scipy.ndimage import distance_transform_edt
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.logging import LoggingSeverity, set_logger_level
 from rclpy.node import Node
@@ -66,37 +68,34 @@ from tf_transformations import (
 # -----------------------------------------------------------------------------
 
 
-def _distance_to_nearest_obstacle(
+def _find_nearest_obstacle_cell(
     grid: np.ndarray,
     mx: int,
     my: int,
-    max_search: int = 25,
-    resolution: float = 0.05,
-) -> float:
+    max_search: int,
+) -> tuple[float, Optional[int], Optional[int]]:
     """
-    Return Euclidean distance (in meters) from map cell (mx, my) to nearest
-    occupied cell, by searching in an expanding square. Unknown (-1) treated
-    as free.
+    Expanding-square search: distance (cells) and (nx, ny) of nearest occupied cell.
+
+    ROS convention: occupied = (grid > 0). Unknown (-1) and 0 are free.
 
     Parameters
     ----------
     grid : np.ndarray
-        2D occupancy grid (0 free, 100 occupied, -1 unknown).
+        2D occupancy grid (0 free, >0 occupied, -1 unknown).
     mx, my : int
-        Map cell indices.
+        Column and row indices of the query cell.
     max_search : int
-        Max cells to search in each direction.
-    resolution : float
-        Map resolution (m/cell).
+        Maximum search radius in cells.
 
     Returns
     -------
-    float
-        Distance in meters, or resolution * max_search if no obstacle in range.
+    tuple of (float, int | None, int | None)
+        (distance_cells, nx, ny); (inf, None, None) if none found or out of bounds.
     """
     h, w = grid.shape
     if mx < 0 or mx >= w or my < 0 or my >= h:
-        return resolution * max_search
+        return float("inf"), None, None
     for r in range(0, max_search + 1):
         for dx in range(-r, r + 1):
             for dy in range(-r, r + 1):
@@ -104,28 +103,63 @@ def _distance_to_nearest_obstacle(
                     continue
                 nx, ny = mx + dx, my + dy
                 if 0 <= nx < w and 0 <= ny < h and grid[ny, nx] > 0:
-                    return math.sqrt(float(dx * dx + dy * dy)) * resolution
-    return resolution * (max_search + 1)
+                    d_cells = math.sqrt(float(dx * dx + dy * dy))
+                    return d_cells, nx, ny
+    return float("inf"), None, None
 
 
-def _compute_distance_map(
+def compute_distance_map(
     grid: np.ndarray,
     resolution: float,
     max_dist: float,
+    method: str = "edt",
 ) -> np.ndarray:
     """
-    Precompute distance (m) from each cell to nearest occupied cell (numpy).
+    Precompute distance (meters) from each cell to the nearest occupied cell.
+
+    Uses either SciPy EDT (O(n), fast) or expanding-square search per cell.
+    ROS convention: occupied = (grid > 0); free = (grid <= 0), so unknown (-1)
+    is treated as free for the distance transform.
+
+    Parameters
+    ----------
+    grid : np.ndarray
+        2D occupancy grid (0 free, 100 occupied, -1 unknown).
+    resolution : float
+        Map resolution in m/cell.
+    max_dist : float
+        Maximum distance in meters; values are capped and used as search limit for expand.
+    method : {'edt', 'expand'}, optional
+        'edt': SciPy Euclidean distance transform (default, fast).
+        'expand': Expanding-square search per cell (slow on large maps).
+
+    Returns
+    -------
+    np.ndarray
+        2D float32 array, same shape as grid: distance in meters to nearest
+        occupied cell, capped at max_dist. Occupied cells get 0.
     """
     h, w = grid.shape
-    max_search = min(50, int(max_dist / resolution) + 1)
-    dist_m = np.full((h, w), max_dist * resolution, dtype=np.float32)
-    for my in range(h):
-        for mx in range(w):
-            d = _distance_to_nearest_obstacle(
-                grid, mx, my, max_search=max_search, resolution=resolution
-            )
-            dist_m[my, mx] = min(d, max_dist)
-    return np.minimum(dist_m, max_dist)
+    max_dist = float(max_dist)
+    if method == "edt":
+        # EDT: 1 = free (distance computed), 0 = occupied (source).
+        # ROS: free = (grid <= 0), occupied = (grid > 0)
+        free = (grid <= 0).astype(np.float64)
+        dist_cells = distance_transform_edt(free)
+        dist_m = (dist_cells * resolution).astype(np.float32)
+        return np.minimum(dist_m, max_dist)
+
+    elif method == "expand":
+        max_search = min(int(max_dist / resolution) + 1, max(h, w) + 1)
+        dist_m = np.full((h, w), max_dist, dtype=np.float32)
+        for my in range(h):
+            for mx in range(w):
+                d_cells, _, _ = _find_nearest_obstacle_cell(grid, mx, my, max_search)
+                d_m = min(d_cells * resolution, max_dist)
+                dist_m[my, mx] = d_m
+    else:
+        raise ValueError(f"Invalid distance map method: {method}")
+    return dist_m
 
 
 # -----------------------------------------------------------------------------
@@ -270,6 +304,8 @@ class MCLNode(Node):
         self.declare_parameter("laser_max_range", 100.0)
         self.declare_parameter("laser_min_range", -1.0)
         self.declare_parameter("likelihood_max_dist", 2.0)
+        # Distance map: 'edt' (SciPy, fast) or 'expand' (expanding-square, fallback).
+        self.declare_parameter("distance_map_method", "edt")
 
         # Pose / particle cloud publishing
         self.declare_parameter("publish_pose_topic", "pose")
@@ -295,13 +331,16 @@ class MCLNode(Node):
         self._map = np.array(msg.data, dtype=np.int32).reshape(
             (msg.info.height, msg.info.width)
         )
-        self._dist_map = _compute_distance_map(
+        method = self._get_param("distance_map_method")
+        self._dist_map = compute_distance_map(
             self._map,
             self._map_metadata["resolution"],
             self._get_param("likelihood_max_dist"),
+            method=method,
         )
         self.log.info(
-            f"Map received: wxh = {self._map_metadata['width']}x{self._map_metadata['height']}, resolution = {self._map_metadata['resolution']:.3f} m/cell"
+            f"Map received: wxh = {self._map_metadata['width']}x{self._map_metadata['height']}, "
+            f"resolution = {self._map_metadata['resolution']:.3f} m/cell, distance_map = {method}"
         )
 
     def _initialize_particles_at(self, x: float, y: float, theta: float) -> None:
@@ -480,7 +519,10 @@ class MCLNode(Node):
         my = np.clip(my, 0, h - 1)
 
         d = self._dist_map[my, mx]
-        log_weights = np.sum(np.where(valid, -0.5 * (d / sigma_hit) ** 2, 0.0), axis=1)
+        inv_sigma_sq = 1.0 / (sigma_hit * sigma_hit)
+        log_weights = np.sum(
+            np.where(valid, -0.5 * inv_sigma_sq * (d * d), 0.0), axis=1
+        )
 
         # Normalize to weights (numerically stable)
         log_weights -= np.max(log_weights)

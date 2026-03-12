@@ -61,10 +61,9 @@ def main(args=None):
     executor = rclpy.executors.MultiThreadedExecutor()
     executor.add_node(node)
     try:
-        while rclpy.ok():
-            executor.spin()
+        executor.spin()
     except KeyboardInterrupt:
-        node.log.error("Keyboard interrupt received")
+        pass
     finally:
         executor.shutdown()
         node.destroy_node()
