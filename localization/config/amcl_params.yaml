@@ -1,0 +1,89 @@
+# Adaptive Monte Carlo Localization (AMCL) node parameters
+# Aligned with Nav2 AMCL defaults where applicable.
+# Ref: https://docs.nav2.org/configuration/packages/configuring-amcl.html
+
+amcl_node:
+  ros__parameters:
+    # --- Frames ---
+    map_frame_id: "map"
+    odom_frame_id: "odom"
+    base_frame_id: "base_footprint"
+
+    # --- Topics ---
+    scan_topic: "scan"
+    odom_topic: "odom"
+    map_topic: "map"
+    initial_pose_topic: "initialpose"
+
+    # --- Particle filter (KLD-adaptive) ---
+    min_particles: 750
+    max_particles: 2000
+    pf_err: 0.05            # KLD maximum approximation error (epsilon)
+    pf_z: 0.99              # KLD confidence quantile (z = 2.33 for 0.99)
+    kld_bin_size_xy: 0.5    # spatial bin size (metres) for KLD histogram
+    kld_bin_size_theta: 0.1745  # angular bin size (radians, ~10 degrees)
+
+    # --- Resampling ---
+    resample_interval: 1    # resample every N filter updates (Nav2 default: 1)
+    resample_neff_ratio: 0.5  # also resample when N_eff < ratio * N
+
+    # --- Recovery (exponential weight tracking, Nav2-style) ---
+    recovery_alpha_slow: 0.001
+    recovery_alpha_fast: 0.1
+
+    # --- Kidnapped-robot detection ---
+    # If N_eff stays below kidnap_neff_ratio * N for kidnap_consecutive_threshold
+    # consecutive updates, inject kidnap_inject_fraction of particles with wide spread.
+    kidnap_neff_ratio: 0.1
+    kidnap_consecutive_threshold: 5
+    kidnap_inject_fraction: 0.5
+    kidnap_per_beam_log_threshold: -2.0  # best particle quality floor; triggers alongside N_eff
+
+    # --- Update gating ---
+    update_min_d: 0.25      # metres of translation before triggering update
+    update_min_a: 0.1       # radians (~5.7 deg) -- smaller than Nav2 default (0.2)
+                            # to reduce per-step noise during rotations
+    force_update_after_init: 10
+
+    # --- Initial pose ---
+    initial_pose_std_xy: 0.5
+    initial_pose_std_theta: 0.26  # ~15 degrees
+    initial_pose_params_override: true
+
+    # --- Motion model (differential drive, squared-magnitude noise) ---
+    # alpha1 (rot from rot) and alpha4 (trans from rot) dominate during rotation.
+    # Lowering them reduces particle spread during large turns.
+    alpha1: 0.1
+    alpha2: 0.1
+    alpha3: 0.2
+    alpha4: 0.1
+
+    # --- Sensor model (likelihood field + z_rand) ---
+    laser_origin_x: 0.45   # laser position in base_footprint (x, metres)
+    laser_origin_y: 0.0    # laser position in base_footprint (y, metres)
+    max_beams: 60
+    sigma_hit: 0.2
+    z_hit: 0.5
+    z_rand: 0.5
+    laser_likelihood_max_dist: 2.0  # distance map cap (metres)
+    max_range_ratio_for_z_max: 0.98
+    laser_max_range: -1.0   # -1 = use message value
+    laser_min_range: -1.0   # -1 = use message value
+
+    # --- Transform ---
+    transform_tolerance: 1.0  # post-date TF by this many seconds (Nav2 default)
+
+    # --- Pose estimation ---
+    use_cluster_estimate: true
+    cluster_bin_xy: 0.5
+    cluster_bin_theta: 0.1745
+
+    # --- Publishing ---
+    publish_pose_topic: "pose"
+    publish_pose_with_covariance_topic: "amcl_pose"
+    publish_particle_cloud_topic: "particle_cloud"
+    particle_cloud_publish_rate: 5.0
+    publish_path_topic: "path"
+    path_max_poses: 200
+    path_decay_time: 0.0
+    tf_publish_rate: 1.0
