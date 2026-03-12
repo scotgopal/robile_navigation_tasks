@@ -17,24 +17,43 @@ mcl_node:
     map_topic: "map"
     initial_pose_topic: "initialpose"
 
-    # Particle filter
+    # Particle filter (tuned for faster convergence with good initial pose)
     num_particles: 1000
-    resample_interval: 1
-    update_min_d: 0.05   # min translation (m) before measurement update
-    update_min_a: 0.1    # min rotation (rad) before measurement update
+    resample_interval: 5   # also resample every N updates (0 = only when N_eff < resample_alpha*N)
+    resample_alpha: 0.5
+    min_updates_before_resample: 2
+    resample_first_n_updates: 5   # resample every update for first N (fast convergence after initial pose)
+    recovery_n_eff_ratio: 0.0      # 0 = disabled. Was injecting particles when N_eff low but often diluted the cloud; re-enable (e.g. 0.05) to try recovery.
+    recovery_fraction: 0.1
+    recovery_min_updates: 25
+    recovery_around_estimate_fraction: 0.5
+    recovery_around_std_xy: 0.5
+    update_min_d: 0.02
+    update_min_a: 0.05
+    update_ignore_motion_first_n: 60   # run on every scan for first 60 updates (~6 s at 10 Hz); then use motion threshold
+    # Initial cloud spread (params used when initial_pose_params_override is true; RViz cannot set covariance)
+    initial_pose_std_xy: 0.02
+    initial_pose_std_theta: 0.01
+    initial_pose_params_override: true   # true = always use params above; false = use message covariance when present
 
-    # Motion model noise (differential drive style)
-    alpha1: 0.2   # rotation noise from rotation
-    alpha2: 0.2   # rotation noise from translation
-    alpha3: 0.2   # translation noise from translation
-    alpha4: 0.2   # translation noise from rotation
+    # Motion model noise (tighter alphas = less spread, measurement focuses cloud faster)
+    motion_noise_scale: 1.0
+    alpha1: 0.1
+    alpha2: 0.1
+    alpha3: 0.1
+    alpha4: 0.1
 
-    # Likelihood field
-    max_beams: 60
-    sigma_hit: 0.2
-    laser_max_range: 100.0
-    laser_min_range: -1.0
+    # Sensor: laser position in base_footprint (from URDF or tf2_echo base_footprint base_laser_front_link)
+    laser_origin_x: 0.45
+    laser_origin_y: 0.0
+    # Use all beams when scan has <= max_beams (e.g. 150-beam scan uses all 150). Set >= your laser beam count.
+    max_beams: 360
+    sigma_hit: 0.1   # smaller = peakier likelihood, faster convergence (0.25 = flatter, less discriminative)
     likelihood_max_dist: 2.0
+    # Map / environment discrepancy (manual or auto-generated map, new obstacles in env)
+    map_uncertainty_scale: 0.1   # sigma_eff = sigma_hit * (1 + this); 0 = trust map fully
+    z_max_log_likelihood: -4.6  # log prob for max-range beams (~0.01); "obstacle not in map" / sensor limit
+    max_range_ratio_for_z_max: 0.98  # beam is max-range when r >= max_range * this
 
     # Output (RViz: pose, PoseWithCovariance, PoseArray, Path)
     publish_pose_topic: "mean_pose"
@@ -45,3 +64,5 @@ mcl_node:
     path_max_poses: 100
     # Path decay: only show poses from the last N seconds (0 = disabled, path stays by path_max_poses)
     path_decay_time: 0.0
+    # Republish map->odom at this rate when idle so the transform does not expire (Hz; 0 = disable)
+    tf_publish_rate: 1.0
